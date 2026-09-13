@@ -308,6 +308,7 @@ All endpoints are served by the Flask app on `http://localhost:5000`.
 | `GET` | `/api/false_alerts?db=<path>` | Q3 — False alert detection |
 | `GET` | `/api/consecutive?db=<path>&n=<min>` | Q4 — Consecutive defect sequences |
 | `GET` | `/api/repeated?db=<path>` | Q5 — Locations repeated in 3+ runs |
+| `POST` | `/api/ask` | Accepts a natural‑language question, generates safe SQL via the local Ollama model, executes read‑only against the SQLite DB and returns a JSON result |
 
 ---
 

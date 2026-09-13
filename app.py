@@ -21,8 +21,15 @@ import sys, os, re, math, queue, sqlite3, threading, subprocess
 from pathlib import Path
 import pandas as pd
 from flask import Flask, Response, request, jsonify
+import llm_sql
 
 app = Flask(__name__)
+
+def create_app():
+    """Factory function returning the Flask app for external imports and testing.
+    Keeps the original global app instance unchanged.
+    """
+    return app
 _log_queue: queue.Queue = queue.Queue()
 _pipeline_running = threading.Event()
 
@@ -576,6 +583,55 @@ def a_tbls():
 
 
 # ════════════════════════════════════════════════════════════
+#  NL-to-SQL ROUTES  (NEW — existing routes above untouched)
+# ════════════════════════════════════════════════════════════
+@app.route("/api/ask", methods=["POST"])
+def a_ask():
+    """Accept a natural-language question, generate SQL via local Ollama,
+    validate, execute (read-only), and return structured JSON."""
+    try:
+        body     = request.get_json(force=True, silent=True) or {}
+        question = str(body.get("question", "")).strip()
+        if not question:
+            return jsonify({"success": False, "error": "Question is required"}), 400
+        db_path  = body.get("db", "railway.db").strip() or "railway.db"
+        result   = llm_sql.ask_question(
+            question,
+            db_path  = db_path,
+            model    = llm_sql.OLLAMA_MODEL,
+            base_url = llm_sql.OLLAMA_BASE_URL,
+            timeout  = llm_sql.OLLAMA_TIMEOUT,
+        )
+        # Invalidate schema cache after every pipeline run; safe to call here too
+        # (no-op if nothing changed — mtime guard inside llm_sql)
+        return jsonify(result)
+    except Exception as ex:
+        import logging
+        logging.getLogger(__name__).error("/api/ask unhandled: %s", ex, exc_info=True)
+        return jsonify({"success": False, "error": "Internal server error."}), 500
+
+
+@app.route("/api/llm-status")
+def a_llm_status():
+    """Lightweight health check: Ollama server + configured model availability."""
+    try:
+        status = llm_sql.check_ollama_status(
+            model    = llm_sql.OLLAMA_MODEL,
+            base_url = llm_sql.OLLAMA_BASE_URL,
+        )
+        return jsonify(status)
+    except Exception as ex:
+        return jsonify({"server_available": False, "error": str(ex)}), 500
+
+
+# Expose invalidation endpoint so the UI can refresh schema after a pipeline run
+@app.route("/api/schema-refresh", methods=["POST"])
+def a_schema_refresh():
+    llm_sql.invalidate_schema_cache()
+    return jsonify({"refreshed": True})
+
+
+# ════════════════════════════════════════════════════════════
 #  HTML PAGE
 # ════════════════════════════════════════════════════════════
 PAGE = r"""<!DOCTYPE html>
@@ -685,6 +741,74 @@ html,body{height:100%;font-family:var(--font);font-size:14px;line-height:1.5;
 .st-txt{font-size:11px;color:#7d8590;flex:1}
 .st-ver{font-family:var(--mono);font-size:10px;color:#484f58}
 .sb-nav-sep{height:1px;background:#21262d;margin:8px 4px}
+/* LLM status badge */
+.llm-badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;
+  padding:3px 9px;border-radius:12px;font-family:var(--mono);font-weight:600;
+  border:1px solid transparent;transition:all .3s;white-space:nowrap}
+.llm-badge.ok{background:rgba(63,185,80,.12);border-color:rgba(63,185,80,.35);color:#3fb950}
+.llm-badge.err{background:rgba(248,81,73,.10);border-color:rgba(248,81,73,.3);color:#f85149}
+.llm-badge.chk{background:rgba(72,79,88,.3);border-color:#30363d;color:#484f58}
+.llm-badge-dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+/* AI sidebar button */
+.qi-ai{display:flex;align-items:flex-start;gap:10px;width:100%;text-align:left;
+  padding:10px;border:1px solid #6e40c9;border-radius:var(--r8);
+  background:rgba(130,80,223,.10);cursor:pointer;color:#bc8cff;
+  transition:all .15s;margin-bottom:6px}
+.qi-ai:hover{background:rgba(130,80,223,.20);border-color:#bc8cff;color:#d2a8ff}
+.qi-ai.active{background:rgba(130,80,223,.28);border-color:#d2a8ff;color:#e2c4ff}
+.qi-ai .qi-num{background:rgba(130,80,223,.22);color:#bc8cff;border-radius:var(--r4);
+  width:22px;height:22px;font-size:12px;display:flex;align-items:center;
+  justify-content:center;flex-shrink:0}
+/* Ask panel styles */
+.ask-wrap{display:flex;flex-direction:column;gap:20px}
+.ask-input-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r12);padding:24px;box-shadow:var(--s2)}
+.ask-label{font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--mid);margin-bottom:10px}
+.ask-textarea{width:100%;min-height:72px;padding:12px 14px;
+  font-family:var(--font);font-size:13px;line-height:1.55;
+  border:1px solid var(--border);border-radius:var(--r8);
+  background:var(--surface);color:var(--ink);resize:vertical;
+  outline:none;transition:border-color .15s,box-shadow .15s}
+.ask-textarea:focus{border-color:#8250df;box-shadow:0 0 0 3px rgba(130,80,223,.18)}
+.ask-examples{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.ask-ex{font-size:11px;padding:4px 11px;border:1px solid var(--border);
+  border-radius:12px;background:var(--surface2);color:var(--mid);
+  cursor:pointer;transition:all .13s;white-space:nowrap}
+.ask-ex:hover{border-color:var(--purple);color:var(--purple);background:var(--purple-l)}
+.ask-row{display:flex;align-items:center;gap:12px;margin-top:14px}
+.btn-ask{padding:10px 24px;background:linear-gradient(135deg,#8250df,#6e40c9);
+  color:#fff;border:none;border-radius:var(--r6);font-family:var(--font);
+  font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;
+  gap:7px;box-shadow:0 2px 8px rgba(130,80,223,.35);transition:all .18s}
+.btn-ask:hover:not(:disabled){background:linear-gradient(135deg,#9d68ff,#8250df);
+  box-shadow:0 4px 16px rgba(130,80,223,.45);transform:translateY(-1px)}
+.btn-ask:active:not(:disabled){transform:translateY(0)}
+.btn-ask:disabled{background:#21262d;box-shadow:none;cursor:not-allowed;
+  color:#484f58;border:1px solid #30363d}
+.btn-ask svg{width:13px;height:13px;fill:currentColor}
+.ask-status{font-size:11px;color:var(--muted)}
+.sql-card{background:#0d1117;border:1px solid #30363d;border-radius:var(--r8);
+  overflow:hidden}
+.sql-card-hd{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 16px;border-bottom:1px solid #21262d;background:#161b22}
+.sql-card-lbl{font-family:var(--mono);font-size:11px;color:#8b949e;font-weight:600;
+  letter-spacing:.05em}
+.sql-badge{font-family:var(--mono);font-size:10px;padding:2px 8px;
+  border-radius:10px;background:rgba(130,80,223,.25);color:#bc8cff;border:1px solid rgba(130,80,223,.4)}
+.sql-body{padding:14px 18px;font-family:var(--mono);font-size:11.5px;
+  line-height:1.7;color:#79c0ff;white-space:pre-wrap;word-break:break-word}
+.ask-result-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r12);overflow:hidden;box-shadow:var(--s2)}
+.ask-result-hd{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 20px;border-bottom:1px solid var(--border)}
+.ask-result-title{font-size:13px;font-weight:700;color:var(--ink)}
+.ask-result-cnt{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--mid)}
+.ask-tbl-scroll{overflow:auto;max-height:520px}
+.ask-tbl-scroll::-webkit-scrollbar{width:5px;height:5px}
+.ask-tbl-scroll::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.retry-note{font-size:11px;color:var(--muted);padding:6px 20px 0;
+  font-style:italic}
 .qi-db{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
   padding:10px;border:1px solid #238636;border-radius:var(--r8);
   background:rgba(35,134,54,.08);cursor:pointer;color:#3fb950;
@@ -947,12 +1071,21 @@ td.txt{font-family:var(--font);font-size:12px;color:var(--body)}
       <div class="qi-body"><div class="qi-title">Repeated in 3 TRC Runs</div>
       <div class="qi-sub">Chronic deficiency locations across runs</div></div>
     </button>
+    <div class="sb-nav-sep"></div>
+    <div class="sb-nav-label">AI Assistant</div>
+    <button class="qi-ai" id="qiAI" onclick="openAsk()">
+      <div class="qi-num">🤖</div>
+      <div class="qi-body">
+        <div class="qi-title">Ask Railway Data</div>
+        <div class="qi-sub">Natural language → SQL (local AI)</div>
+      </div>
+    </button>
   </div>
 
   <div class="sb-foot">
     <div class="st-dot" id="stDot"></div>
     <span class="st-txt" id="stTxt">Ready</span>
-    <span class="st-ver">v2.0</span>
+    <span class="llm-badge chk" id="llmBadge" title="Local AI status"><span class="llm-badge-dot"></span><span id="llmBadgeTxt">AI…</span></span>
   </div>
 </div>
 
@@ -1439,6 +1572,159 @@ function errBanner(msg){return`<div class="fade"><div class="alert err">
 function emptyState(msg){return`<div class="empty"><div class="empty-ico">📭</div>${e(msg)}</div>`;}
 
 window.addEventListener('load',checkScript);
+window.addEventListener('load',checkLLM);
+
+/* ══ LLM STATUS ══ */
+async function checkLLM(){
+  try{
+    const d=await(await fetch('/api/llm-status')).json();
+    const badge=$('llmBadge'), txt=$('llmBadgeTxt');
+    if(d.server_available&&d.model_available){
+      badge.className='llm-badge ok';
+      txt.textContent='Local AI Online';
+      badge.title=`Ollama: ${d.model} ready`;
+    } else if(d.server_available&&!d.model_available){
+      badge.className='llm-badge err';
+      txt.textContent='Model Missing';
+      badge.title=d.model_error||'Model not found in Ollama';
+    } else {
+      badge.className='llm-badge err';
+      txt.textContent='Ollama Offline';
+      badge.title=d.server_error||'Cannot reach Ollama at localhost:11434';
+    }
+  }catch(_){
+    const badge=$('llmBadge');
+    badge.className='llm-badge err';
+    $('llmBadgeTxt').textContent='AI Offline';
+  }
+}
+
+/* ══ ASK PANEL ══ */
+const EXAMPLES=[
+  'Show the 10 locations with highest vertical wear',
+  'Which sections have the most broken sleepers?',
+  'What is the average lateral wear per section?',
+  'Show all rail defects greater than 3mm',
+  'Count SOD alerts by line direction',
+  'Find locations with vegetation defects longer than 5 metres',
+];
+
+function openAsk(){
+  document.querySelectorAll('.qi,.qi-db').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.qi-ai').forEach(b=>b.classList.remove('active'));
+  $('qiAI').classList.add('active');
+  G.q=null;
+  $('topbar').innerHTML='';
+  setStatus('ok','Ask Railway Data');
+  renderAskPanel();
+}
+
+function renderAskPanel(){
+  const exHtml=EXAMPLES.map(ex=>`<span class="ask-ex" onclick="fillExample(${JSON.stringify(e(ex))})">${e(ex)}</span>`).join('');
+  $('content').innerHTML=`<div class="fade ask-wrap">
+    <div class="pg-hd">
+      <div class="pg-bc">AI ASSISTANT · LOCAL INFERENCE</div>
+      <div class="pg-t">Ask Your Railway Data</div>
+      <div class="pg-d">Type a plain-English question. The local AI model generates SQL against the live database — fully offline, read-only.</div>
+    </div>
+    <div class="ask-input-card">
+      <div class="ask-label">Your Question</div>
+      <textarea class="ask-textarea" id="askInput" rows="3"
+        placeholder="e.g. Show the 10 locations with highest vertical wear"></textarea>
+      <div class="ask-label" style="margin-top:12px">Example Questions</div>
+      <div class="ask-examples">${exHtml}</div>
+      <div class="ask-row">
+        <button class="btn-ask" id="btnAsk" onclick="submitAsk()">
+          <svg viewBox="0 0 16 16"><path d="M0 0l16 8-16 8V0zm0 7v2l7-1-7-1z"/></svg>
+          Ask Database
+        </button>
+        <span class="ask-status" id="askStatus"></span>
+      </div>
+    </div>
+    <div id="askOutput"></div>
+  </div>`;
+}
+
+function fillExample(txt){
+  const ta=$('askInput');
+  if(ta){ta.value=txt;ta.focus();}
+}
+
+async function submitAsk(){
+  const question=($('askInput').value||'').trim();
+  if(!question){$('askStatus').textContent='Please enter a question.';return;}
+  if(question.length>1000){$('askStatus').textContent='Question too long (max 1000 chars).';return;}
+
+  const btn=$('btnAsk');
+  btn.disabled=true;
+  $('askStatus').innerHTML='<span class="spin"></span> Generating SQL…';
+  $('askOutput').innerHTML='';
+  setStatus('run','AI generating SQL…');
+
+  try{
+    const resp=await fetch('/api/ask',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question,db:DB()}),
+    });
+    const data=await resp.json();
+    renderAskOutput(data);
+  } catch(ex){
+    $('askOutput').innerHTML=errBanner('Network error: '+ex.message);
+  } finally{
+    btn.disabled=false;
+    $('askStatus').textContent='';
+    setStatus('ok','Query complete');
+  }
+}
+
+function renderAskOutput(data){
+  if(!data.success){
+    $('askOutput').innerHTML=`<div class="fade"><div class="alert err">
+      <svg viewBox="0 0 16 16"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575L6.457 1.047zM9 11H7V9h2v2zm0-3H7V5h2v3z"/></svg>
+      <div class="alert-txt"><strong>Error:</strong> ${e(data.error||'Unknown error')}</div>
+    </div></div>`;
+    return;
+  }
+
+  const retryNote=data.retried
+    ? '<div class="retry-note">⚡ SQL was corrected and retried automatically.</div>'
+    : '';
+
+  // SQL display
+  const sqlHtml=`<div class="sql-card fade">
+    <div class="sql-card-hd">
+      <span class="sql-card-lbl">Generated SQL</span>
+      <span class="sql-badge">read-only · local AI</span>
+    </div>
+    <div class="sql-body">${e(data.sql||'')}</div>
+  </div>`;
+
+  // Results table
+  const cols=data.columns||[];
+  const rows=data.rows||[];
+  let tableHtml;
+  if(!rows.length){
+    tableHtml=`<div class="empty"><div class="empty-ico">📭</div>No matching records found.</div>`;
+  } else {
+    const thead='<thead><tr>'+cols.map(c=>`<th>${e(LABELS[c]||c.replace(/_/g,' '))}</th>`).join('')+'</tr></thead>';
+    const tbody='<tbody>'+rows.map(row=>'<tr>'+cols.map((_,ci)=>{
+      const v=row[ci];
+      const sv=v===null||v===undefined?'—':String(v);
+      const isN=sv!=='—'&&sv!==''&&!isNaN(parseFloat(sv))&&isFinite(sv);
+      return`<td class="${isN?'mono':'txt'}">${e(sv)}</td>`;
+    }).join('')+'</tr>').join('')+'</tbody>';
+    tableHtml=`<div class="ask-result-card fade">
+      <div class="ask-result-hd">
+        <span class="ask-result-title">Results</span>
+        <span class="ask-result-cnt">${rows.length.toLocaleString()} row${rows.length!==1?'s':''}</span>
+      </div>${retryNote}
+      <div class="ask-tbl-scroll"><table>${thead}${tbody}</table></div>
+    </div>`;
+  }
+
+  $('askOutput').innerHTML=sqlHtml+tableHtml;
+}
 </script>
 </body>
 </html>"""

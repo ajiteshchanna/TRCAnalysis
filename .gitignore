@@ -1,1 +1,49 @@
-data/
+# .gitignore
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.env/
+.env*/
+
+# Environment files
+*.env
+
+# SQLite temporary files
+*.sqlite3
+*.db-journal
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Logs
+*.log
+logs/
+
+# IDE / editor files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Pytest cache
+.pytest_cache/
+.cache/
+
+# MyPy cache
+.mypy_cache/
+
+# Ruff cache
+.ruff_cache/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Data folder (already ignored)
+/data/
