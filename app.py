@@ -1,5 +1,5 @@
 """
-Railway TRC Analytics — Complete Web Application
+Tabular Data Analytics — Railway TRC Demonstration
 =================================================
 SETUP:
   pip install flask pandas openpyxl
@@ -605,7 +605,7 @@ def _export_text(value):
 
 def _make_pdf(title, context, columns, rows):
     """Create a small, readable single-font PDF without a runtime PDF dependency."""
-    lines = [title or "Railway Query Results"]
+    lines = [title or "Query Results"]
     if context:
         lines.append(f"Query: {context}")
     lines.append("")
@@ -679,7 +679,7 @@ def a_export():
         return jsonify({"error": "Export rows must be a list"}), 400
 
     values = _export_rows(columns, rows)
-    title = _export_text(body.get("title")) or "Railway Query Results"
+    title = _export_text(body.get("title")) or "Query Results"
     context = _export_text(body.get("context"))
     if export_type == "csv":
         stream = StringIO(newline="")
@@ -1232,7 +1232,7 @@ td.txt{font-family:var(--font);font-size:12px;color:var(--body)}
     <button class="qi-ai" id="qiAI" onclick="openAsk()">
       <div class="qi-num">🤖</div>
       <div class="qi-body">
-        <div class="qi-title">Ask Railway Data</div>
+        <div class="qi-title">Ask Your Data</div>
         <div class="qi-sub">Natural language → SQL (local AI)</div>
       </div>
     </button>
@@ -1755,7 +1755,7 @@ function showQ5(i){
 /* ══ TABLE RENDERER ══ */
 function mkTable(cols,rows,sc){
   if(!rows.length)return emptyState('No records found.');
-  const exportId=registerExport(cols,rows,'Railway Query Results','Analytical query results');
+  const exportId=registerExport(cols,rows,'Query Results','Analytical query results');
   const nums=rows.map(r=>safeNum(r[sc])).filter(v=>v>0).sort((a,b)=>b-a);
   const p33=nums.length?nums[Math.floor(nums.length*.33)]:Infinity;
   const p66=nums.length?nums[Math.floor(nums.length*.66)]:Infinity;
@@ -1823,6 +1823,10 @@ async function checkLLM(){
 
 /* ══ ASK PANEL ══ */
 const EXAMPLES=[
+  'Show the top 10 customers by revenue',
+  'What is the average sales amount by region?',
+  'Find products with stock below 10',
+  'Count employees by department',
   'Show the 10 locations with highest vertical wear',
   'Which sections have the most broken sleepers?',
   'What is the average lateral wear per section?',
@@ -1837,7 +1841,7 @@ function openAsk(){
   $('qiAI').classList.add('active');
   G.q=null;
   $('topbar').innerHTML='';
-  setStatus('ok','Ask Railway Data');
+  setStatus('ok','Ask Your Data');
   renderAskPanel();
 }
 
@@ -1846,8 +1850,8 @@ function renderAskPanel(){
   $('content').innerHTML=`<div class="fade ask-wrap">
     <div class="pg-hd">
       <div class="pg-bc">AI ASSISTANT · LOCAL INFERENCE</div>
-      <div class="pg-t">Ask Your Railway Data</div>
-      <div class="pg-d">Type a plain-English question. The local AI model generates SQL against the live database — fully offline, read-only.</div>
+      <div class="pg-t">Ask Your Data</div>
+      <div class="pg-d">Ask questions in plain English about any tables loaded into the selected SQLite database. The local AI model uses the live schema and runs read-only SQL.</div>
     </div>
     <div class="ask-input-card">
       <div class="ask-label">Your Question</div>
@@ -1936,7 +1940,7 @@ function renderAskOutput(data,question){
       const isN=sv!=='—'&&sv!==''&&!isNaN(parseFloat(sv))&&isFinite(sv);
       return`<td class="${isN?'mono':'txt'}">${e(sv)}</td>`;
     }).join('')+'</tr>').join('')+'</tbody>';
-    const exportId=registerExport(cols,rows,'Railway Query Results',question||'Natural-language query');
+    const exportId=registerExport(cols,rows,'Query Results',question||'Natural-language query');
     tableHtml=`<div class="ask-result-card fade">
       <div class="ask-result-hd">
         <span class="ask-result-title">Results</span>

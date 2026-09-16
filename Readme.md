@@ -1,13 +1,14 @@
-# 🚆 Railway TRC Analytics — BSL Division
+# 📊 Tabular Data Analytics — Railway TRC Demonstration
 
-**An end-to-end inspection intelligence platform for Indian Railways.**  
-Parses raw Track Recording Car (TRC) Excel reports, loads them into a structured SQLite database, and surfaces five actionable analytical queries through a polished web dashboard.
+**A generic natural-language analytics platform for tabular datasets.**
+Inspects the live schema of a configured SQLite database, turns plain-English questions into safe read-only SQL, visualises results, and exports them. Indian Railways Track Recording Car (TRC) inspection data is the primary demonstration and use case.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Generic Tabular Analytics](#generic-tabular-analytics)
 - [Architecture](#architecture)
 - [Project Structure](#project-structure)
 - [Data Source](#data-source)
@@ -27,15 +28,32 @@ Parses raw Track Recording Car (TRC) Excel reports, loads them into a structured
 
 ## Overview
 
-Indian Railways uses Track Recording Cars (TRCs) to continuously measure the physical condition of tracks. The resulting inspection reports are delivered as complex, multi-block Excel files — each file containing dozens of embedded report tables with merged cells, multiline metadata headers, and varying layouts.
+The platform has two layers:
 
-This project:-
+### Generic platform capabilities
 
-1. **Parses** those Excel files automatically using a robust Python pipeline (`railway_pipeline.py`)
-2. **Stores** extracted, cleaned data into a SQLite database (`railway.db`)
-3. **Analyses** the data through 5 purpose-built queries accessible via a Flask web dashboard (`app.py`)
+- Dynamic SQLite table and column discovery at query time
+- Natural-language-to-SQL generation using the discovered schema
+- Read-only SQL validation and execution
+- Result tables, visualisation, and CSV/XLSX/PDF export
+- A database summary showing the tables and row counts currently available
 
-The target deployment is the **BSL Division, Central Railway**.
+The AI Assistant is not limited to railway tables. It can query any tabular dataset that has been ingested into the selected SQLite database. The database must contain the data first: the generic assistant does not itself provide an automatic importer for every possible CSV, Excel, or other tabular format.
+
+### Railway demonstration modules
+
+`railway_pipeline.py` is a railway-specific ingestion pipeline for complex TRC workbooks. The Q1–Q5 dashboards in `app.py` are railway-specific analytical examples built around the resulting TRC tables. These modules remain available as the primary demonstration; they are separate from the generic database inspection and AI query layer.
+
+## Generic Tabular Analytics
+
+After loading a dataset into SQLite, ask questions such as:
+
+- “Show the top 10 customers by revenue.”
+- “What is the average sales amount by region?”
+- “Find products with stock below 10.”
+- “Count employees by department.”
+
+The assistant uses the actual table and column names discovered from SQLite, so arbitrary table names and schemas are supported. It does not invent tables or columns that are absent from the selected database.
 
 ---
 
@@ -45,28 +63,18 @@ The target deployment is the **BSL Division, Central Railway**.
 ┌─────────────────────────────────────────────────────────┐
 │                      app.py (Flask)                     │
 │                                                         │
-│   ┌──────────────────┐    ┌─────────────────────────┐  │
-│   │  Pipeline Trigger │    │   Analytical Queries    │  │
-│   │  (POST /run)      │    │   Q1 Worst 20%          │  │
-│   │  SSE Streaming    │    │   Q2 Resource Deploy    │  │
-│   │  (/stream)        │    │   Q3 False Alerts       │  │
-│   └────────┬─────────┘    │   Q4 Consecutive Defects│  │
-│            │               │   Q5 Repeated in 3 Runs │  │
-│            ▼               └──────────┬──────────────┘  │
-│   railway_pipeline.py                 │                  │
-│   (subprocess)                        │                  │
-│            │                          │                  │
-│            ▼                          ▼                  │
-│         railway.db  ←──────────────────────────────────  │
-│         (SQLite)                                        │
+│   Generic database/AI layer │ Railway demonstration     │
+│   schema discovery          │ pipeline + Q1–Q5          │
+│   /api/tables, /api/ask     │ railway_pipeline.py       │
+│            │                │ /api/worst20 … /repeated  │
+│            └───────────────►│ configured SQLite DB      │
 └─────────────────────────────────────────────────────────┘
         ▲
-        │ reads
-   data/*.xlsx
-   (8 TRC report files)
+        │ any ingested tabular data
+        │ (TRC Excel pipeline is one supported path)
 ```
 
-The web UI is a **single-page application** embedded directly in `app.py` as a Python string. It uses vanilla HTML/CSS/JS with no build step required.
+The web UI is a single-page application embedded directly in `app.py` as a Python string. It uses vanilla HTML/CSS/JS with no build step required.
 
 ---
 
@@ -127,7 +135,8 @@ Eight TRC exception report types are supported, mapped to their corresponding SQ
 
 - Python 3.8+
 - `pip`
-- The 8 TRC Excel files placed in a `data/` folder
+- A SQLite database containing the tabular data you want to query
+- The 8 TRC Excel files in `data/` only when using the railway demonstration pipeline
 
 ### Install Dependencies
 
@@ -158,9 +167,9 @@ python app.py
 
 Open your browser at **http://localhost:5000**
 
-### Step 2 — Ingest Excel Data (Pipeline)
+### Step 2 — Load data into SQLite
 
-**Via the web UI (recommended):**
+**Railway demonstration (supported ingestion path):**
 
 1. In the sidebar, confirm the **Data Folder** path points to your `data/` directory  
    (default: `D:\ENGINEER\IndianRailwaysProject\data`)
@@ -174,15 +183,17 @@ Open your browser at **http://localhost:5000**
 python railway_pipeline.py ./data railway.db
 ```
 
-### Step 3 — Run Analytical Queries
+The pipeline is designed for the supported TRC workbook layouts and maps the eight railway report types to railway-specific tables. It is not a universal CSV/Excel importer. To use another dataset, ingest it into SQLite using the dataset's appropriate loader or SQLite tooling, then set the database path in the web UI.
 
-After the pipeline completes, click any of **Q1–Q5** in the sidebar, or click **DB Summary** to see table row counts and an overview of what was loaded.
+### Step 3 — Run queries and dashboards
+
+Click **Ask Your Data** to query any loaded tables in natural language, or click **DB Summary** to inspect the discovered tables and row counts. When the railway tables are present, the railway-specific **Q1–Q5** dashboards are also available.
 
 ---
 
 ## Pipeline Deep Dive
 
-`railway_pipeline.py` handles the full ETL lifecycle:
+`railway_pipeline.py` handles the railway-specific ETL lifecycle:
 
 ### Key Processing Steps
 
@@ -276,7 +287,7 @@ Identifies **chronic problem locations** — KM points deficient across three or
 
 ## Database Schema
 
-Each SQLite table contains the defect-specific measurement columns (vary by table) plus the standard 10 metadata columns:
+The generic AI layer reads every table and column directly from the selected SQLite database using SQLite schema inspection. It does not require the railway table names below. Railway tables produced by the demonstration pipeline contain defect-specific measurement columns plus the standard 10 metadata columns:
 
 ```sql
 -- Example: vertical_wear_data
@@ -288,7 +299,7 @@ trc_no, run_date, run_no,
 defect, rail_side, source_file, sheet_name
 ```
 
-The database file is `railway.db` (~11.4 MB with current data).
+The default demonstration database file is `railway.db`.
 
 ---
 
@@ -308,7 +319,7 @@ All endpoints are served by the Flask app on `http://localhost:5000`.
 | `GET` | `/api/false_alerts?db=<path>` | Q3 — False alert detection |
 | `GET` | `/api/consecutive?db=<path>&n=<min>` | Q4 — Consecutive defect sequences |
 | `GET` | `/api/repeated?db=<path>` | Q5 — Locations repeated in 3+ runs |
-| `POST` | `/api/ask` | Accepts a natural‑language question, generates safe SQL via the local Ollama model, executes read‑only against the SQLite DB and returns a JSON result |
+| `POST` | `/api/ask` | Accepts a natural-language question, discovers the selected SQLite schema, generates safe SQL via the local Ollama model, executes it read-only, and returns a JSON result |
 
 ---
 
@@ -348,6 +359,10 @@ pip install jupyter
 
 - `app.py` and `railway_pipeline.py` **must reside in the same directory** for the web UI's pipeline detection to work automatically.
 - The pipeline is idempotent on schema: re-running on the same DB will append data but will not add new columns. Clear `railway.db` before a fresh full reload.
+- The generic assistant can query tables already present in the selected SQLite database, but it does not replace a general-purpose CSV/Excel ingestion service. The railway pipeline only supports the documented TRC workbook layouts.
+- Natural-language SQL quality depends on the local Ollama model and the clarity of the discovered schema. Queries must be read-only and are capped at 500 returned rows.
+- Q1–Q5 are railway-specific dashboards; they may return no results or errors when their expected TRC tables and columns are not present, while **Ask Your Data** remains the generic query surface.
+- The maintained automated test suite is located in `tests/` and currently passes all 11 tests. The older `test_llm_sql.py` script is retained as a legacy/manual validation utility and is not part of the maintained pytest suite.
 - The web app runs on port **5000** with threading enabled (`threaded=True`). Debug mode is off by default.
 - The `data/` folder is git-ignored to prevent large Excel files from being committed.
 

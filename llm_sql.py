@@ -1,13 +1,13 @@
 """
-llm_sql.py — Local Text-to-SQL module for Railway TRC Analytics
+llm_sql.py — Local Text-to-SQL module for tabular-data analytics
 ================================================================
 Uses a locally-running Ollama instance (qwen2.5-coder:7b by default)
 to convert natural-language questions into safe, read-only SQLite SQL.
 
 Key guarantees
 --------------
-* Schema read dynamically from the SQLite file (never hardcoded).
-* Schema cache is invalidated automatically when railway.db mtime changes.
+* Schema read dynamically from the configured SQLite file (never hardcoded).
+* Schema cache is invalidated automatically when the database mtime changes.
 * SQL validated with multi-layer approach: keyword allowlist/blocklist,
   comment detection, multi-statement detection, and a read-only SQLite
   connection at execution time.
@@ -38,9 +38,10 @@ OLLAMA_TIMEOUT  = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
 MAX_ROWS        = 500          # hard cap on returned rows
 MAX_QUESTION    = 1000         # max characters in a user question
 
-# ── Semantic hints for important railway-domain columns ───────────────────────
-# These are HINTS layered on top of the dynamically inspected schema.
-# They are never used as the source of truth for table/column existence.
+# ── Optional semantic hints for the TRC demonstration dataset ─────────────────
+# These hints improve interpretation of the railway demo's text-valued columns.
+# They are layered on top of the dynamically inspected schema and are never
+# used as the source of truth for table/column existence.
 COLUMN_HINTS: dict[str, str] = {
     # vertical_wear_data
     "max_vertical_wear_mm":          "Maximum vertical rail wear in mm (numeric text)",
@@ -152,7 +153,10 @@ def invalidate_schema_cache() -> None:
 # ── Prompt Builder ────────────────────────────────────────────────────────────
 def build_prompt(question: str, schema_text: str) -> str:
     """Build a strict, schema-aware Text-to-SQL prompt."""
-    return f"""You are a SQLite SQL generator for an Indian Railways track inspection database.
+    return f"""You are a SQLite SQL generator for a generic tabular-data analytics platform.
+The database may contain any user-provided dataset. Infer the answer only from
+the live schema below; do not assume railway tables, columns, or a particular
+domain.
 
 DATABASE SCHEMA
 ===============
@@ -164,11 +168,12 @@ CRITICAL RULES — follow every rule exactly:
    ATTACH, DETACH, VACUUM, PRAGMA, REINDEX, TRUNCATE, or any write/admin SQL.
 3. Use ONLY the exact table names and column names listed in the schema above.
    Do NOT invent, guess, or alias to nonexistent names.
-4. ALL numeric/measurement columns are stored as TEXT in SQLite.
-   For any numeric operation (SUM, AVG, MIN, MAX, comparison, ORDER BY numeric,
-   arithmetic), always cast using:
+4. Respect the declared SQLite types in the schema. For numeric operations
+   (SUM, AVG, MIN, MAX, comparisons, numeric ORDER BY, arithmetic), use numeric
+   columns directly. If a value is declared or clearly represented as TEXT but
+   contains numbers, use:
        CAST(NULLIF(column_name, '') AS REAL)
-   Example:  ORDER BY CAST(NULLIF(max_vertical_wear_mm, '') AS REAL) DESC
+   Do not apply railway-specific assumptions to other datasets.
 5. Add LIMIT 100 unless the question asks for more or aggregates all rows.
 6. Do NOT include SQL comments (-- or /* */).
 7. Do NOT include any explanation, markdown, or surrounding text.
@@ -424,7 +429,8 @@ def _build_correction_prompt(
     schema_text: str,
 ) -> str:
     """Build a follow-up prompt asking the model to fix its previous SQL."""
-    return f"""You are a SQLite SQL generator. Your previous SQL query was rejected.
+    return f"""You are a SQLite SQL generator for a generic tabular-data analytics platform.
+Your previous SQL query was rejected.
 
 DATABASE SCHEMA
 ===============
@@ -445,8 +451,9 @@ ERROR
 CORRECTION RULES (same as before, plus):
 - Fix ONLY the error described above.
 - Keep the same query intent.
-- Remember: ALL numeric columns are stored as TEXT.
-  Always use CAST(NULLIF(column_name, '') AS REAL) for any numeric operation.
+- Respect the declared SQLite types. Cast text-valued numeric columns with
+  CAST(NULLIF(column_name, '') AS REAL) when needed, but do not assume every
+  dataset stores numbers as text.
 - Output ONLY the corrected raw SQL query. No comments, no explanation.
 
 CORRECTED SQL QUERY:"""
