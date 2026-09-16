@@ -584,6 +584,119 @@ def a_tbls():
     except Exception as ex: return jsonify({"error": str(ex)}), 500
 
 
+_GENERIC_QUESTION_FALLBACK = [
+    "Show the first 10 rows",
+    "Count the records in the main table",
+    "Show the available columns",
+]
+
+
+def _quote_sql_identifier(identifier):
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def _question_suggestions(db_path):
+    """Build deterministic, local example questions from the live SQLite schema."""
+    suggestions = []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        schema = {}
+        for (table_name,) in tables:
+            columns = conn.execute(
+                f"PRAGMA table_info({_quote_sql_identifier(table_name)})"
+            ).fetchall()
+            schema[table_name] = [str(column[1]) for column in columns]
+        conn.close()
+    except (OSError, sqlite3.Error) as ex:
+        print(f"Question suggestion schema inspection failed: {ex}")
+        return list(_GENERIC_QUESTION_FALLBACK)
+
+    def add(question):
+        if question not in suggestions:
+            suggestions.append(question)
+
+    table_names = list(schema)
+    railway_tables = {
+        "vertical_wear_data", "lateral_wear_data", "sod_data",
+        "sleeper_defects_data", "rail_defects_data", "fittings_data",
+        "ballast_vegetation_data", "lip_flow_data",
+    }
+    if railway_tables.intersection(table_names):
+        if "vertical_wear_data" in schema:
+            add("Show the 10 locations with highest vertical wear")
+        if "lateral_wear_data" in schema:
+            add("What is the average lateral wear per section?")
+        if "sleeper_defects_data" in schema:
+            add("Which sections have the most broken sleepers?")
+        if "rail_defects_data" in schema:
+            add("Show all rail defects greater than 3mm")
+        if "sod_data" in schema:
+            add("Count SOD alerts by line direction")
+        if "ballast_vegetation_data" in schema:
+            add("Find locations with vegetation defects longer than 5 metres")
+        if suggestions:
+            return suggestions[:8]
+
+    for table_name, columns in schema.items():
+        lower_table = table_name.lower()
+        lower_columns = {column.lower(): column for column in columns}
+        numeric = [
+            column for column in columns
+            if any(token in column.lower() for token in (
+                "amount", "revenue", "sales", "price", "cost", "total",
+                "quantity", "qty", "stock", "count", "number", "score",
+                "value", "wear", "length", "size",
+            ))
+            or any(type_token in column.lower() for type_token in ("int", "real", "numeric", "decimal"))
+        ]
+        categorical = [
+            column for column in columns
+            if any(token in column.lower() for token in (
+                "region", "department", "category", "type", "status",
+                "name", "customer", "product", "employee", "section",
+            ))
+        ]
+        categorical.sort(key=lambda column: (
+            1 if "name" in column.lower() else 0,
+            columns.index(column),
+        ))
+        table_label = table_name.replace("_", " ")
+
+        if numeric and categorical:
+            add(f"What is the average {numeric[0].replace('_', ' ')} by {categorical[0].replace('_', ' ')}?")
+        if numeric:
+            add(f"Show the top 10 {table_label} by {numeric[0].replace('_', ' ')}")
+        if categorical:
+            add(f"Count {table_label} by {categorical[0].replace('_', ' ')}")
+
+        if "customer" in lower_table and numeric:
+            add(f"Show the top 10 customers by {numeric[0].replace('_', ' ')}")
+        if ("sales" in lower_table or "order" in lower_table) and categorical and numeric:
+            add(f"What is the average {numeric[0].replace('_', ' ')} by {categorical[0].replace('_', ' ')}?")
+        if ("inventory" in lower_table or "product" in lower_table) and numeric:
+            stock_column = next(
+                (column for column in numeric if "stock" in column.lower() or "quantity" in column.lower()),
+                numeric[0],
+            )
+            add(f"Find products with {stock_column.replace('_', ' ')} below 10")
+        if "employee" in lower_table and categorical:
+            add(f"Count employees by {categorical[0].replace('_', ' ')}")
+
+    if not suggestions:
+        suggestions = list(_GENERIC_QUESTION_FALLBACK)
+    return suggestions[:8]
+
+
+@app.route("/api/question-suggestions")
+def a_question_suggestions():
+    db_path = request.args.get("db", "railway.db").strip() or "railway.db"
+    return jsonify({"suggestions": _question_suggestions(db_path)})
+
+
 def _export_rows(columns, rows):
     """Normalize dict/list rows into the ordered values used by every export."""
     normalized = []
@@ -915,7 +1028,7 @@ html,body{height:100%;font-family:var(--font);font-size:14px;line-height:1.5;
 .ask-examples{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .ask-ex{font-size:11px;padding:4px 11px;border:1px solid var(--border);
   border-radius:12px;background:var(--surface2);color:var(--mid);
-  cursor:pointer;transition:all .13s;white-space:nowrap}
+  cursor:pointer;transition:all .13s;white-space:nowrap;font-family:inherit}
 .ask-ex:hover{border-color:var(--purple);color:var(--purple);background:var(--purple-l)}
 .ask-row{display:flex;align-items:center;gap:12px;margin-top:14px}
 .btn-ask{padding:10px 24px;background:linear-gradient(135deg,#8250df,#6e40c9);
@@ -1273,7 +1386,7 @@ td.txt{font-family:var(--font);font-size:12px;color:var(--body)}
 const G={q:null,evtSrc:null,pipeLogLines:[],exports:{},exportSeq:0};
 const DB=()=>document.getElementById('dbPath').value.trim()||'railway.db';
 const $=id=>document.getElementById(id);
-const e=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const e=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const enc=s=>encodeURIComponent(s);
 
 function registerExport(columns,rows,title,context){
@@ -1822,17 +1935,10 @@ async function checkLLM(){
 }
 
 /* ══ ASK PANEL ══ */
-const EXAMPLES=[
-  'Show the top 10 customers by revenue',
-  'What is the average sales amount by region?',
-  'Find products with stock below 10',
-  'Count employees by department',
-  'Show the 10 locations with highest vertical wear',
-  'Which sections have the most broken sleepers?',
-  'What is the average lateral wear per section?',
-  'Show all rail defects greater than 3mm',
-  'Count SOD alerts by line direction',
-  'Find locations with vegetation defects longer than 5 metres',
+const FALLBACK_EXAMPLES=[
+  'Show the first 10 rows',
+  'Count the records in the main table',
+  'Show the available columns',
 ];
 
 function openAsk(){
@@ -1842,11 +1948,11 @@ function openAsk(){
   G.q=null;
   $('topbar').innerHTML='';
   setStatus('ok','Ask Your Data');
+  $('dbPath').onchange=()=>renderAskPanel();
   renderAskPanel();
 }
 
 function renderAskPanel(){
-  const exHtml=EXAMPLES.map(ex=>`<span class="ask-ex" onclick="fillExample(${JSON.stringify(e(ex))})">${e(ex)}</span>`).join('');
   $('content').innerHTML=`<div class="fade ask-wrap">
     <div class="pg-hd">
       <div class="pg-bc">AI ASSISTANT · LOCAL INFERENCE</div>
@@ -1856,9 +1962,9 @@ function renderAskPanel(){
     <div class="ask-input-card">
       <div class="ask-label">Your Question</div>
       <textarea class="ask-textarea" id="askInput" rows="3"
-        placeholder="e.g. Show the 10 locations with highest vertical wear"></textarea>
+        placeholder="e.g. Ask a question about your loaded data"></textarea>
       <div class="ask-label" style="margin-top:12px">Example Questions</div>
-      <div class="ask-examples">${exHtml}</div>
+      <div class="ask-examples" id="askExamples">${renderSuggestionChips(FALLBACK_EXAMPLES)}</div>
       <div class="ask-row">
         <button class="btn-ask" id="btnAsk" onclick="submitAsk()">
           <svg viewBox="0 0 16 16"><path d="M0 0l16 8-16 8V0zm0 7v2l7-1-7-1z"/></svg>
@@ -1869,6 +1975,30 @@ function renderAskPanel(){
     </div>
     <div id="askOutput"></div>
   </div>`;
+  refreshQuestionSuggestions();
+}
+
+function renderSuggestionChips(suggestions){
+  return (suggestions||FALLBACK_EXAMPLES).map(question =>
+    `<button type="button" class="ask-ex" data-question="${e(question)}">${e(question)}</button>`
+  ).join('');
+}
+
+document.addEventListener('click',event=>{
+  const chip=event.target.closest('.ask-ex');
+  if(chip)fillExample(chip.dataset.question||'');
+});
+
+async function refreshQuestionSuggestions(){
+  const target=$('askExamples');
+  if(!target)return;
+  try{
+    const response=await fetch('/api/question-suggestions?db='+enc(DB()));
+    const data=await response.json();
+    if($('askExamples'))$('askExamples').innerHTML=renderSuggestionChips(data.suggestions);
+  }catch(_){
+    // The deterministic fallback remains visible when schema inspection is unavailable.
+  }
 }
 
 function fillExample(txt){

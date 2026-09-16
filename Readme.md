@@ -314,6 +314,7 @@ All endpoints are served by the Flask app on `http://localhost:5000`.
 | `POST` | `/run` | Starts the ingestion pipeline in a background thread |
 | `GET` | `/stream` | Server-Sent Events stream of live pipeline log output |
 | `GET` | `/api/tables?db=<path>` | Lists all tables and row counts in the database |
+| `GET` | `/api/question-suggestions?db=<path>` | Builds deterministic example questions from the selected database schema |
 | `GET` | `/api/worst20?db=<path>&scope=<section>` | Q1 — Worst 20% locations |
 | `GET` | `/api/resources?db=<path>` | Q2 — Resource deployment priorities |
 | `GET` | `/api/false_alerts?db=<path>` | Q3 — False alert detection |
