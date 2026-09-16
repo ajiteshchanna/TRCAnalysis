@@ -18,6 +18,8 @@ RUN:
 """
 
 import sys, os, re, math, queue, sqlite3, threading, subprocess
+import csv
+from io import BytesIO, StringIO
 from pathlib import Path
 import pandas as pd
 from flask import Flask, Response, request, jsonify
@@ -582,6 +584,145 @@ def a_tbls():
     except Exception as ex: return jsonify({"error": str(ex)}), 500
 
 
+def _export_rows(columns, rows):
+    """Normalize dict/list rows into the ordered values used by every export."""
+    normalized = []
+    for row in rows:
+        if isinstance(row, dict):
+            normalized.append([row.get(column, "") for column in columns])
+        elif isinstance(row, (list, tuple)):
+            normalized.append(list(row[:len(columns)]) + [""] * max(0, len(columns) - len(row)))
+        else:
+            normalized.append([str(row)] + [""] * max(0, len(columns) - 1))
+    return normalized
+
+
+def _export_text(value):
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _make_pdf(title, context, columns, rows):
+    """Create a small, readable single-font PDF without a runtime PDF dependency."""
+    lines = [title or "Railway Query Results"]
+    if context:
+        lines.append(f"Query: {context}")
+    lines.append("")
+    lines.append(" | ".join(_export_text(column) for column in columns))
+    lines.extend(" | ".join(_export_text(value) for value in row) for row in rows)
+    lines = [line.encode("latin-1", "replace").decode("latin-1") for line in lines]
+
+    page_lines = 48
+    pages = [lines[i:i + page_lines] for i in range(0, len(lines), page_lines)] or [[]]
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
+    ]
+    page_refs = []
+    for page in pages:
+        stream_lines = ["BT", "/F1 8 Tf", "36 756 Td"]
+        for index, line in enumerate(page):
+            escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            if index:
+                stream_lines.append("0 -14 Td")
+            stream_lines.append(f"({escaped[:180]}) Tj")
+        stream_lines.append("ET")
+        stream = "\n".join(stream_lines).encode("latin-1", "replace")
+        page_obj = len(objects) + 1
+        content_obj = page_obj + 1
+        page_refs.append(page_obj)
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 4 0 R >> >> /Contents {content_obj} 0 R >>".encode()
+        )
+        objects.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
+
+    objects[1] = (
+        f"<< /Type /Pages /Kids [{' '.join(f'{ref} 0 R' for ref in page_refs)}] "
+        f"/Count {len(page_refs)} >>".encode()
+    )
+    output = BytesIO()
+    output.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for number, obj in enumerate(objects, 1):
+        offsets.append(output.tell())
+        output.write(f"{number} 0 obj\n".encode())
+        output.write(obj)
+        output.write(b"\nendobj\n")
+    xref = output.tell()
+    output.write(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        output.write(f"{offset:010d} 00000 n \n".encode())
+    output.write(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref}\n%%EOF".encode()
+    )
+    return output.getvalue()
+
+
+@app.route("/api/export", methods=["POST"])
+def a_export():
+    """Generate a local download for the currently displayed result table."""
+    body = request.get_json(force=True, silent=True) or {}
+    export_type = str(body.get("type", "")).lower()
+    columns = body.get("columns") or []
+    rows = body.get("rows") or []
+    if export_type not in {"csv", "xlsx", "pdf"}:
+        return jsonify({"error": "Unsupported export format"}), 400
+    if not isinstance(columns, list) or not all(isinstance(column, str) for column in columns):
+        return jsonify({"error": "Export columns must be a list of strings"}), 400
+    if not isinstance(rows, list):
+        return jsonify({"error": "Export rows must be a list"}), 400
+
+    values = _export_rows(columns, rows)
+    title = _export_text(body.get("title")) or "Railway Query Results"
+    context = _export_text(body.get("context"))
+    if export_type == "csv":
+        stream = StringIO(newline="")
+        writer = csv.writer(stream, lineterminator="\r\n")
+        writer.writerow(columns)
+        writer.writerows(values)
+        payload, content_type, filename = (
+            stream.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", "railway_query_results.csv"
+        )
+    elif export_type == "xlsx":
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            return jsonify({"error": "Excel export requires the openpyxl package"}), 500
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Query Results"
+        sheet.append(columns)
+        for cell in sheet[1]:
+            cell.font = Font(bold=True)
+        for row in values:
+            sheet.append(row)
+        sheet.freeze_panes = "A2"
+        for index, column in enumerate(columns, 1):
+            width = max([len(_export_text(column))] + [len(_export_text(row[index - 1])) for row in values])
+            sheet.column_dimensions[get_column_letter(index)].width = min(width + 2, 40)
+        stream = BytesIO()
+        workbook.save(stream)
+        payload, content_type, filename = (
+            stream.getvalue(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "railway_query_results.xlsx",
+        )
+    else:
+        payload, content_type, filename = _make_pdf(title, context, columns, values), "application/pdf", "railway_query_results.pdf"
+    return Response(payload, mimetype=content_type.split(";")[0], headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    })
+
+
 # ════════════════════════════════════════════════════════════
 #  NL-to-SQL ROUTES  (NEW — existing routes above untouched)
 # ════════════════════════════════════════════════════════════
@@ -802,6 +943,21 @@ html,body{height:100%;font-family:var(--font);font-size:14px;line-height:1.5;
   border-radius:var(--r12);overflow:hidden;box-shadow:var(--s2)}
 .ask-result-hd{display:flex;align-items:center;justify-content:space-between;
   padding:14px 20px;border-bottom:1px solid var(--border)}
+.result-tools{display:flex;align-items:center;gap:10px;margin-left:auto}
+.export-wrap{position:relative}
+.export-btn{width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--border);border-radius:var(--r6);background:var(--surface);
+  color:var(--mid);cursor:pointer;transition:all .15s}
+.export-btn:hover,.export-btn:focus{border-color:var(--blue);color:var(--blue);
+  outline:none;background:var(--blue-l)}
+.export-btn svg{width:14px;height:14px;fill:currentColor}
+.export-menu{position:absolute;z-index:20;right:0;top:32px;width:190px;padding:5px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r8);
+  box-shadow:var(--s4)}
+.export-menu button{display:block;width:100%;padding:8px 10px;border:0;border-radius:var(--r4);
+  background:transparent;color:var(--body);font:600 10px var(--font);letter-spacing:.04em;
+  text-align:left;cursor:pointer}
+.export-menu button:hover{background:var(--surface2);color:var(--blue)}
 .ask-result-title{font-size:13px;font-weight:700;color:var(--ink)}
 .ask-result-cnt{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--mid)}
 .ask-tbl-scroll{overflow:auto;max-height:520px}
@@ -1114,11 +1270,75 @@ td.txt{font-family:var(--font);font-size:12px;color:var(--body)}
 
 <script>
 /* ══ GLOBALS & UTILS ══ */
-const G={q:null,evtSrc:null,pipeLogLines:[]};
+const G={q:null,evtSrc:null,pipeLogLines:[],exports:{},exportSeq:0};
 const DB=()=>document.getElementById('dbPath').value.trim()||'railway.db';
 const $=id=>document.getElementById(id);
 const e=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const enc=s=>encodeURIComponent(s);
+
+function registerExport(columns,rows,title,context){
+  const id='export-'+(++G.exportSeq);
+  const displayColumns=columns.map(c=>LABELS[c]||String(c).replace(/_/g,' '));
+  const values=rows.map(row=>Array.isArray(row)
+    ? row.slice(0,columns.length)
+    : columns.map(column=>row&&typeof row==='object'?row[column]:''));
+  G.exports[id]={columns:displayColumns,rows:values,title,context};
+  return id;
+}
+function exportButton(id){
+  return`<div class="result-tools"><div class="export-wrap">
+    <button class="export-btn" aria-label="Download table results" title="Download table results"
+      onclick="toggleExportMenu(event,'${id}')">
+      <svg viewBox="0 0 16 16"><path d="M8 1a.75.75 0 0 1 .75.75v7.44l2.22-2.22a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 1 1 1.06-1.06l2.22 2.22V1.75A.75.75 0 0 1 8 1zM2 13.25c0-.41.34-.75.75-.75h10.5a.75.75 0 1 1 0 1.5H2.75a.75.75 0 0 1-.75-.75z"/></svg>
+    </button>
+    <div class="export-menu" id="${id}-menu" hidden>
+      <button onclick="exportTable('${id}','xlsx')">DOWNLOAD AS EXCEL</button>
+      <button onclick="exportTable('${id}','csv')">DOWNLOAD AS CSV</button>
+      <button onclick="exportTable('${id}','pdf')">DOWNLOAD AS PDF</button>
+    </div>
+  </div></div>`;
+}
+function toggleExportMenu(event,id){
+  event.stopPropagation();
+  document.querySelectorAll('.export-menu').forEach(menu=>menu.hidden=true);
+  const menu=$(id+'-menu');
+  if(menu)menu.hidden=false;
+}
+function closeExportMenus(){
+  document.querySelectorAll('.export-menu').forEach(menu=>menu.hidden=true);
+}
+async function exportTable(id,type){
+  closeExportMenus();
+  const table=G.exports[id];
+  if(!table||!table.columns.length){
+    setStatus('err','Nothing to export');
+    return;
+  }
+  try{
+    const response=await fetch('/api/export',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({...table,type}),
+    });
+    if(!response.ok){
+      const detail=await response.json().catch(()=>({}));
+      throw new Error(detail.error||'Export failed');
+    }
+    const blob=await response.blob();
+    const link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);
+    link.download=type==='xlsx'?'railway_query_results.xlsx':
+      type==='csv'?'railway_query_results.csv':'railway_query_results.pdf';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(()=>URL.revokeObjectURL(link.href),1000);
+    setStatus('ok','Download ready');
+  }catch(ex){
+    setStatus('err','Export error: '+ex.message);
+  }
+}
+document.addEventListener('click',closeExportMenus);
 
 /* ── NULL-SAFE HELPERS ──
    The key fix: all numeric display values go through these helpers
@@ -1472,6 +1692,7 @@ function mkConsecTable(rows){
   if(!rows.length)return emptyState('No consecutive sequences found.');
   const maxV=Math.max(1,...rows.map(r=>safeNum(r.consecutive_kms)));
   const cols=["section_name","line_direction","from_km","to_km","consecutive_kms","total_defects","run_date"];
+  const exportId=registerExport(cols,rows,'Consecutive Defective KMs','Q4');
   const html=rows.map(row=>`<tr>${cols.map(c=>{
     if(c==='consecutive_kms'){
       const v=safeNum(row[c]),pct=Math.round(v/maxV*100);
@@ -1482,7 +1703,7 @@ function mkConsecTable(rows){
     return`<td class="${isN?'mono':'txt'}">${e(fmtVal(v))}</td>`;
   }).join('')}</tr>`).join('');
   return`<div class="tbl-card">
-    <div class="tbl-bar"><span class="tbl-cnt">${rows.length.toLocaleString()} sequences</span></div>
+    <div class="tbl-bar"><span class="tbl-cnt">${rows.length.toLocaleString()} sequences</span>${exportButton(exportId)}</div>
     <div class="tbl-scroll"><table>
       <thead><tr>${cols.map(c=>`<th>${e(LABELS[c]||c.replace(/_/g,' '))}</th>`).join('')}</tr></thead>
       <tbody>${html}</tbody>
@@ -1534,6 +1755,7 @@ function showQ5(i){
 /* ══ TABLE RENDERER ══ */
 function mkTable(cols,rows,sc){
   if(!rows.length)return emptyState('No records found.');
+  const exportId=registerExport(cols,rows,'Railway Query Results','Analytical query results');
   const nums=rows.map(r=>safeNum(r[sc])).filter(v=>v>0).sort((a,b)=>b-a);
   const p33=nums.length?nums[Math.floor(nums.length*.33)]:Infinity;
   const p66=nums.length?nums[Math.floor(nums.length*.66)]:Infinity;
@@ -1549,7 +1771,7 @@ function mkTable(cols,rows,sc){
     return`<td class="${isN?'mono':'txt'}">${e(fmtVal(v))}</td>`;
   }).join('')}</tr>`).join('');
   return`<div class="tbl-card">
-    <div class="tbl-bar"><span class="tbl-cnt">${rows.length.toLocaleString()} records</span></div>
+    <div class="tbl-bar"><span class="tbl-cnt">${rows.length.toLocaleString()} records</span>${exportButton(exportId)}</div>
     <div class="tbl-scroll"><table>
       <thead><tr>${cols.map(c=>`<th>${e(LABELS[c]||c.replace(/_/g,' '))}</th>`).join('')}</tr></thead>
       <tbody>${html}</tbody>
@@ -1668,7 +1890,7 @@ async function submitAsk(){
       body:JSON.stringify({question,db:DB()}),
     });
     const data=await resp.json();
-    renderAskOutput(data);
+    renderAskOutput(data,question);
   } catch(ex){
     $('askOutput').innerHTML=errBanner('Network error: '+ex.message);
   } finally{
@@ -1678,7 +1900,7 @@ async function submitAsk(){
   }
 }
 
-function renderAskOutput(data){
+function renderAskOutput(data,question){
   if(!data.success){
     $('askOutput').innerHTML=`<div class="fade"><div class="alert err">
       <svg viewBox="0 0 16 16"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575L6.457 1.047zM9 11H7V9h2v2zm0-3H7V5h2v3z"/></svg>
@@ -1714,10 +1936,11 @@ function renderAskOutput(data){
       const isN=sv!=='—'&&sv!==''&&!isNaN(parseFloat(sv))&&isFinite(sv);
       return`<td class="${isN?'mono':'txt'}">${e(sv)}</td>`;
     }).join('')+'</tr>').join('')+'</tbody>';
+    const exportId=registerExport(cols,rows,'Railway Query Results',question||'Natural-language query');
     tableHtml=`<div class="ask-result-card fade">
       <div class="ask-result-hd">
         <span class="ask-result-title">Results</span>
-        <span class="ask-result-cnt">${rows.length.toLocaleString()} row${rows.length!==1?'s':''}</span>
+        <div class="result-tools"><span class="ask-result-cnt">${rows.length.toLocaleString()} row${rows.length!==1?'s':''}</span>${exportButton(exportId)}</div>
       </div>${retryNote}
       <div class="ask-tbl-scroll"><table>${thead}${tbody}</table></div>
     </div>`;
