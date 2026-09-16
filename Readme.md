@@ -29,7 +29,7 @@ Parses raw Track Recording Car (TRC) Excel reports, loads them into a structured
 
 Indian Railways uses Track Recording Cars (TRCs) to continuously measure the physical condition of tracks. The resulting inspection reports are delivered as complex, multi-block Excel files — each file containing dozens of embedded report tables with merged cells, multiline metadata headers, and varying layouts.
 
-This project:
+This project:-
 
 1. **Parses** those Excel files automatically using a robust Python pipeline (`railway_pipeline.py`)
 2. **Stores** extracted, cleaned data into a SQLite database (`railway.db`)
