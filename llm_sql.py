@@ -25,18 +25,37 @@ import logging
 import sqlite3
 import urllib.request
 import urllib.error
+from urllib.parse import urlparse
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 log = logging.getLogger(__name__)
 
 # ── Configuration (environment variables with sane defaults) ──────────────────
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL",    "qwen2.5-coder:7b")
 DATABASE_PATH   = os.environ.get("DATABASE_PATH",   "railway.db")
 OLLAMA_TIMEOUT  = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
 MAX_ROWS        = 500          # hard cap on returned rows
 MAX_QUESTION    = 1000         # max characters in a user question
+
+
+def _local_ollama_url(base_url: str) -> str:
+    """Validate that Ollama is addressed through the local loopback interface."""
+    parsed = urlparse(str(base_url).rstrip("/"))
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "Ollama must use a local loopback HTTP URL "
+            "(http://127.0.0.1:11434 or http://localhost:11434)."
+        )
+    return str(base_url).rstrip("/")
 
 # ── Optional semantic hints for the TRC demonstration dataset ─────────────────
 # These hints improve interpretation of the railway demo's text-valued columns.
@@ -201,7 +220,7 @@ def call_ollama(
     Detailed logging of request/response sizes and HTTP status is performed.
     A single retry is performed for transient HTTP 500 server errors.
     """
-    url = f"{base_url}/api/generate"
+    url = f"{_local_ollama_url(base_url)}/api/generate"
     payload_dict = {
         "model": model,
         "prompt": prompt,
@@ -579,11 +598,22 @@ def check_ollama_status(
     Check Ollama server availability AND configured model availability separately.
     Returns a status dict consumed by GET /api/llm-status.
     """
-    status: dict = {"model": model, "base_url": base_url}
+    try:
+        local_base_url = _local_ollama_url(base_url)
+    except ValueError as ex:
+        return {
+            "model": model,
+            "base_url": base_url,
+            "server_available": False,
+            "model_available": False,
+            "server_error": str(ex),
+        }
+
+    status: dict = {"model": model, "base_url": local_base_url}
 
     # 1. Server reachable?
     try:
-        req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
+        req = urllib.request.Request(f"{local_base_url}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
             body = json.loads(resp.read().decode())
         status["server_available"] = True

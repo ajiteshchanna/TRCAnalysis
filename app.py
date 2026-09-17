@@ -21,6 +21,7 @@ import sys, os, re, math, queue, sqlite3, threading, subprocess
 import csv
 from io import BytesIO, StringIO
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 import pandas as pd
 from flask import Flask, Response, request, jsonify
 import llm_sql
@@ -717,63 +718,110 @@ def _export_text(value):
 
 
 def _make_pdf(title, context, columns, rows):
-    """Create a small, readable single-font PDF without a runtime PDF dependency."""
-    lines = [title or "Query Results"]
-    if context:
-        lines.append(f"Query: {context}")
-    lines.append("")
-    lines.append(" | ".join(_export_text(column) for column in columns))
-    lines.extend(" | ".join(_export_text(value) for value in row) for row in rows)
-    lines = [line.encode("latin-1", "replace").decode("latin-1") for line in lines]
+    """Create a wrapped, paginated ReportLab table PDF."""
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-    page_lines = 48
-    pages = [lines[i:i + page_lines] for i in range(0, len(lines), page_lines)] or [[]]
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
+    safe_columns = [_export_text(column) for column in columns]
+    safe_rows = [[_export_text(value) for value in row] for row in rows]
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    title_style.fontName = "Helvetica-Bold"
+    title_style.fontSize = 16
+    title_style.leading = 20
+    query_style = ParagraphStyle(
+        "ExportQuery", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=9, leading=12, spaceAfter=8,
+    )
+    cell_style = ParagraphStyle(
+        "ExportCell", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=7.5, leading=9, alignment=TA_LEFT,
+    )
+    header_style = ParagraphStyle(
+        "ExportHeader", parent=cell_style, fontName="Helvetica-Bold",
+        textColor=colors.white,
+    )
+
+    # Estimate each column's natural width, then select landscape for wide tables.
+    estimated_widths = [
+        min(180, max(42, max(
+            [len(column) * 4.4] +
+            [min(180, len(_export_text(row[index])) * 3.8)
+             for row in safe_rows[:100] if index < len(row)]
+        ) + 12))
+        for index, column in enumerate(safe_columns)
     ]
-    page_refs = []
-    for page in pages:
-        stream_lines = ["BT", "/F1 8 Tf", "36 756 Td"]
-        for index, line in enumerate(page):
-            escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-            if index:
-                stream_lines.append("0 -14 Td")
-            stream_lines.append(f"({escaped[:180]}) Tj")
-        stream_lines.append("ET")
-        stream = "\n".join(stream_lines).encode("latin-1", "replace")
-        page_obj = len(objects) + 1
-        content_obj = page_obj + 1
-        page_refs.append(page_obj)
-        objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            f"/Resources << /Font << /F1 4 0 R >> >> /Contents {content_obj} 0 R >>".encode()
-        )
-        objects.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
+    portrait_width = A4[0] - 2 * 15 * mm
+    use_landscape = sum(estimated_widths) > portrait_width
+    page_size = landscape(A4) if use_landscape else A4
+    usable_width = page_size[0] - 2 * 15 * mm
+    total_width = sum(estimated_widths) or usable_width
+    if total_width > usable_width and estimated_widths:
+        scale = usable_width / total_width
+        column_widths = [max(32, width * scale) for width in estimated_widths]
+        correction = usable_width / sum(column_widths)
+        column_widths = [width * correction for width in column_widths]
+    else:
+        column_widths = estimated_widths
 
-    objects[1] = (
-        f"<< /Type /Pages /Kids [{' '.join(f'{ref} 0 R' for ref in page_refs)}] "
-        f"/Count {len(page_refs)} >>".encode()
+    def paragraph(value, style):
+        return Paragraph(xml_escape(_export_text(value)).replace("\n", "<br/>"), style)
+
+    table_data = [[paragraph(column, header_style) for column in safe_columns]]
+    table_data.extend([
+        [paragraph(value, cell_style) for value in row[:len(safe_columns)]]
+        for row in safe_rows
+    ])
+    if not safe_columns:
+        table_data = [[paragraph("No columns available.", cell_style)]]
+        column_widths = [usable_width]
+    elif not safe_rows:
+        table_data.append([paragraph("No results found.", cell_style)] + [""] * (len(safe_columns) - 1))
+
+    table = Table(
+        table_data,
+        colWidths=column_widths,
+        repeatRows=1,
+        hAlign="LEFT",
     )
+    table_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4e78")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#b7c9d6")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f6f8")]),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if safe_columns and not safe_rows:
+        table_style.extend([
+            ("SPAN", (0, 1), (-1, 1)),
+            ("BACKGROUND", (0, 1), (-1, 1), colors.white),
+        ])
+    table.setStyle(TableStyle(table_style))
+
     output = BytesIO()
-    output.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0]
-    for number, obj in enumerate(objects, 1):
-        offsets.append(output.tell())
-        output.write(f"{number} 0 obj\n".encode())
-        output.write(obj)
-        output.write(b"\nendobj\n")
-    xref = output.tell()
-    output.write(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
-    for offset in offsets[1:]:
-        output.write(f"{offset:010d} 00000 n \n".encode())
-    output.write(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
-        f"startxref\n{xref}\n%%EOF".encode()
+    document = SimpleDocTemplate(
+        output,
+        pagesize=page_size,
+        rightMargin=15 * mm,
+        leftMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm,
+        title="Railway Query Results",
+        author="Railway TRC Analytics",
     )
+    story = [Paragraph("Railway Query Results", title_style)]
+    if context:
+        story.append(Paragraph(f"<b>Query:</b> {xml_escape(context)}", query_style))
+    story.extend([Spacer(1, 4), table])
+    document.build(story)
     return output.getvalue()
 
 
@@ -894,8 +942,6 @@ PAGE = r"""<!DOCTYPE html>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>TRC Analytics — BSL Division</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
 <style>
 :root{
   --sidebar-bg:#0d1117;--sidebar-bd:#21262d;--sidebar-hover:#161b22;
@@ -905,7 +951,7 @@ PAGE = r"""<!DOCTYPE html>
   --blue:#0969da;--blue-l:#ddf4ff;--green:#1a7f37;--green-l:#dcffe4;
   --amber:#9a6700;--amber-l:#fff8c5;--red:#cf222e;--red-l:#ffebe9;
   --purple:#8250df;--purple-l:#fbefff;
-  --font:'Plus Jakarta Sans',sans-serif;--mono:'JetBrains Mono',monospace;
+  --font:Inter,'Segoe UI',Arial,sans-serif;--mono:'Cascadia Mono','Segoe UI Mono',Consolas,monospace;
   --r4:4px;--r6:6px;--r8:8px;--r12:12px;
   --s1:0 1px 2px rgba(0,0,0,.06);
   --s2:0 2px 6px rgba(0,0,0,.08),0 0 0 1px rgba(0,0,0,.04);

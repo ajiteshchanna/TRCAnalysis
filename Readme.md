@@ -141,18 +141,19 @@ Eight TRC exception report types are supported, mapped to their corresponding SQ
 ### Install Dependencies
 
 ```bash
-pip install flask pandas openpyxl
+pip install -r requirements.txt
 ```
 
-Or using the requirements file (covers pipeline dependencies only):
+The requirements file includes the Flask web application, railway pipeline, and
+CSV/XLSX/PDF export dependencies:
 
 ```bash
 pip install -r requirements.txt
-pip install flask  # add Flask for the web app
 ```
 
-> `requirements.txt` currently lists `pandas>=2.0.0` and `openpyxl>=3.1.0`.  
-> Flask is additionally required to run `app.py`.
+Internet access is needed only to install the Python packages and download the
+Ollama model. Once setup is complete, runtime operation is local and does not
+require internet access.
 
 ---
 
@@ -188,6 +189,25 @@ The pipeline is designed for the supported TRC workbook layouts and maps the eig
 ### Step 3 — Run queries and dashboards
 
 Click **Ask Your Data** to query any loaded tables in natural language, or click **DB Summary** to inspect the discovered tables and row counts. When the railway tables are present, the railway-specific **Q1–Q5** dashboards are also available.
+
+### Offline operation
+
+TRC Analytics runs fully locally after the dependencies and Ollama model are
+installed. Ollama must be running on the same computer at
+`http://127.0.0.1:11434` (the application also accepts the equivalent
+`http://localhost:11434` loopback URL). No cloud LLM, external database,
+telemetry service, or remote data source is required at runtime.
+
+Before disconnecting from the internet, complete the initial setup:
+
+```bash
+pip install -r requirements.txt
+ollama pull qwen2.5-coder:7b
+```
+
+The railway pipeline reads local `.xlsx` files and writes to local SQLite.
+CSV, Excel, and PDF exports are generated locally. The web interface uses
+system font fallbacks and does not load Google Fonts or other CDN assets.
 
 ---
 
